@@ -1,5 +1,6 @@
-from sqlmodel import SQLModel, Session, create_engine
-from orchestrator.entities import Requirement, ClarifyingQuestion
+from sqlmodel import SQLModel, create_engine
+
+from orchestrator.entities import ClarifyingQuestion, Requirement
 
 engine = create_engine("sqlite:///forgeflow.db")
 
