@@ -16,4 +16,4 @@ with Session(engine) as session:
     ).all()
     print(f"\n{len(questions)} questions:")
     for q in questions:
-        print("-", q.question)
+        print("-", q.question, "->", q.answer)
