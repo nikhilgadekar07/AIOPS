@@ -40,7 +40,6 @@ The project supports a story-first flow from a natural-language prompt through w
 - ai-agents/rag: repo chunking, ingestion, and retrieval
 - ai-agents/agents: requirement, spec, and implementation logic
 - ai-agents/prompts: LLM prompts for ambiguity, spec generation, critique, and impact analysis
-- tests: focused implementation and validation tests
 
 ## Important change
 
@@ -129,17 +128,11 @@ The response should contain:
 {"status":"ok"}
 ```
 
-### 7. Run the automated tests
-
-```powershell
-python -m unittest discover -s tests -p "test_*.py"
-```
-
 ### Build output
 
 Generated workspaces, pipeline results, process logs, the local SQLite database, and Chroma data are runtime state. They are intentionally ignored by Git so every clone starts with a clean local workspace.
 
-The repository contains only the active builder path and its tests. Legacy command-line flows, duplicate UI files, and the old sample application are not included.
+The repository contains only the active builder path. Legacy command-line flows, duplicate UI files, test-only files, and the old sample application are not included.
 
 ## Stop the server
 
