@@ -31,9 +31,7 @@ The current implementation keeps the fundamental stages that matter:
 
 ## Current status
 
-The project now supports a story-first flow while preserving the underlying workflow stages that make AI-assisted implementation possible.
-
-The sample app under services/sample-app remains a useful validation target, but it is no longer the only product pattern and it is no longer the primary UX model.
+The project supports a story-first flow from a natural-language prompt through workspace preparation, specification, implementation, and validation. The active application entry point is `ai-agents/ui_server.py`; the server starts the complete pipeline in `ai-agents/run_full_pipeline.py`.
 
 ## Architecture
 
@@ -42,7 +40,7 @@ The sample app under services/sample-app remains a useful validation target, but
 - ai-agents/rag: repo chunking, ingestion, and retrieval
 - ai-agents/agents: requirement, spec, and implementation logic
 - ai-agents/prompts: LLM prompts for ambiguity, spec generation, critique, and impact analysis
-- services/sample-app: validation app for local feature testing
+- tests: focused implementation and validation tests
 
 ## Important change
 
@@ -139,7 +137,9 @@ python -m unittest discover -s tests -p "test_*.py"
 
 ### Build output
 
-Generated workspaces and pipeline results are written under `ai-agents/workspace/`. They are intentionally ignored by Git because they are runtime output. The local SQLite database and Chroma data are also local runtime state.
+Generated workspaces, pipeline results, process logs, the local SQLite database, and Chroma data are runtime state. They are intentionally ignored by Git so every clone starts with a clean local workspace.
+
+The repository contains only the active builder path and its tests. Legacy command-line flows, duplicate UI files, and the old sample application are not included.
 
 ## Stop the server
 

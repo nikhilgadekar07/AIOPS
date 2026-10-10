@@ -32,7 +32,7 @@ class ImplementationAgentTests(unittest.TestCase):
             spec,
             codebase_chunks=[
                 {
-                    "file_path": "services/sample-app/app/orders.py",
+                    "file_path": "existing_code/app/orders.py",
                     "content": "Order status values are stored in a dictionary for created orders.",
                     "start_line": 1,
                     "end_line": 50,
