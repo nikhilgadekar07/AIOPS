@@ -12,7 +12,7 @@ with Session(engine) as session:
 
     for i, q in enumerate(questions):
         status = "answered" if q.answer else "unanswered"
-        print(f"[{4}] ({status}) {q.question}")
+        print(f"[{1}] ({status}) {q.question}")
 
     choice = int(input("\nWhich question number do you want to answer? "))
     answer_text = input("Your answer: ")

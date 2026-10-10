@@ -13,6 +13,7 @@ class Requirement(SQLModel, table=True):
     project_mode: str = "new"
     repo_url: Optional[str] = None
     workspace_path: Optional[str] = None
+    require_human_review: bool = False
 
 
 class ClarifyingQuestion(SQLModel, table=True):

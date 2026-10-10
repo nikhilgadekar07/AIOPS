@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AIOPS AI Builder</title>
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        background: #111827;
+        color: #e5e7eb;
+        margin: 0;
+        padding: 32px;
+      }
+      .container {
+        max-width: 1100px;
+        margin: 0 auto;
+      }
+      .panel {
+        background: #1f2937;
+        border: 1px solid #374151;
+        border-radius: 12px;
+        padding: 20px;
+        margin-bottom: 20px;
+      }
+      textarea, input, button {
+        width: 100%;
+        box-sizing: border-box;
+        margin-top: 10px;
+        padding: 12px;
+        border-radius: 8px;
+        border: 1px solid #4b5563;
+        background: #0f172a;
+        color: white;
+      }
+      button {
+        cursor: pointer;
+        background: #2563eb;
+        border: none;
+        font-weight: bold;
+      }
+      .status {
+        margin-top: 12px;
+        color: #93c5fd;
+        font-weight: bold;
+      }
+      pre {
+        white-space: pre-wrap;
+        background: #020817;
+        padding: 16px;
+        border-radius: 8px;
+        overflow: auto;
+      }
+      .grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 20px;
+      }
+      @media (max-width: 800px) {
+        .grid { grid-template-columns: 1fr; }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <h1>AIOPS AI Builder</h1>
+
+      <div class="panel">
+        <h2>Tell the AI what to build</h2>
+        <p style="color:#cbd5e1;">Describe the app, feature, workflow, or project in plain English. The AI will understand the goal, clarify what matters, plan the implementation, and build it into the workspace as a real artifact.</p>
+
+        <textarea id="prompt" rows="10" placeholder="Example: Build a customer support dashboard with a sidebar, ticket list, status filters, and a create-ticket form."></textarea>
+
+        <button id="runBtn">Build it for me</button>
+        <div id="msg" class="status"></div>
+      </div>
+
+      <div class="grid">
+        <div class="panel">
+          <h2>Latest requirement records</h2>
+          <div id="requirements"></div>
+        </div>
+
+        <div class="panel">
+          <h2>Latest output</h2>
+          <pre id="result">No output yet.</pre>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      const msg = document.getElementById('msg');
+      const requirementsEl = document.getElementById('requirements');
+      const resultEl = document.getElementById('result');
+
+      async function fetchRequirements() {
+        const res = await fetch('/api/requirements');
+        const items = await res.json();
+        if (!items.length) {
+          requirementsEl.innerHTML = '<p>No requirements yet.</p>';
+          return;
+        }
+
+        const latest = items[items.length - 1];
+        requirementsEl.innerHTML = `
+          <ul>
+            ${items.slice().reverse().map(item => `
+              <li><strong>${item.requirement_id}</strong> - ${item.title} (${item.status || 'unknown'})</li>
+            `).join('')}
+          </ul>
+          <p>Latest: ${latest.requirement_id} / ${latest.title}</p>
+        `;
+      }
+
+      async function fetchLatestOutput() {
+        const res = await fetch('/api/latest');
+        const data = await res.json();
+        if (data.status === 'no-data') {
+          resultEl.textContent = data.message;
+          return;
+        }
+
+        let lines = [];
+        if (data.prompt) {
+          lines.push('Prompt: ' + data.prompt);
+        }
+        if (Array.isArray(data.stages) && data.stages.length) {
+          lines.push('');
+          lines.push('Execution log:');
+          for (const step of data.stages) {
+            lines.push('- ' + step.stage + ': ' + step.message);
+          }
+        }
+        if (data.plan || data.validation) {
+          lines.push('');
+          lines.push('Plan:');
+          lines.push(JSON.stringify(data.plan || {}, null, 2));
+          lines.push('');
+          lines.push('Validation:');
+          lines.push(JSON.stringify(data.validation || {}, null, 2));
+        }
+        resultEl.textContent = lines.join('\n');
+      }
+
+      async function runPipeline() {
+        const prompt = document.getElementById('prompt').value.trim();
+
+        if (!prompt) {
+          msg.textContent = 'Please describe what you want to build.';
+          return;
+        }
+
+        msg.textContent = 'Understanding your request and starting the build flow...';
+        const res = await fetch('/api/run', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ prompt, mode: 'new' })
+        });
+
+        const data = await res.json();
+        if (!res.ok) {
+          msg.textContent = data.detail || 'Request failed.';
+          return;
+        }
+
+        msg.textContent = data.message;
+        setTimeout(() => {
+          fetchRequirements();
+          fetchLatestOutput();
+        }, 2000);
+      }
+
+      document.getElementById('runBtn').addEventListener('click', runPipeline);
+      fetchRequirements();
+      fetchLatestOutput();
+      setInterval(() => {
+        fetchRequirements();
+        fetchLatestOutput();
+      }, 5000);
+    </script>
+  </body>
+</html>

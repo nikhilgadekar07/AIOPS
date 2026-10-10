@@ -11,6 +11,8 @@ from input_adapter.workspace import prepare_from_github, prepare_from_zip, prepa
 from orchestrator.db import engine, init_db
 from orchestrator.entities import ClarifyingQuestion, Requirement
 from orchestrator.spec_store import latest_spec, save_spec
+from rag.ingest import ingest_workspace
+from rag.retriever import retrieve_context
 
 
 init_db()
@@ -31,12 +33,35 @@ def build_resolved(session, requirement_id):
     ]
 
 
+def retrieve_codebase_chunks(req: Requirement, requirement_text: str):
+    if req.project_mode != "existing" or not req.workspace_path:
+        return []
+    try:
+        ingest_workspace(req.requirement_id, req.workspace_path)
+    except Exception:
+        return []
+
+    resolved = []
+    with Session(engine) as session:
+        questions = session.exec(
+            select(ClarifyingQuestion).where(ClarifyingQuestion.requirement_id == req.requirement_id)
+        ).all()
+        resolved = [
+            f"Q: {q.question}\nA: {q.answer or q.assumed_default}"
+            for q in questions
+        ]
+
+    query = "\n\n".join([req.title, requirement_text, *resolved])
+    return retrieve_context(req.requirement_id, query, top_k=5)
+
+
 def run_spec_stage(session, req, feedback=None):
     resolved = build_resolved(session, req.requirement_id)
     description = req.raw_text
     if feedback:
         description += f"\n\nAdditional feedback from reviewer: {feedback}"
-    content = generate_spec(req.title, description, resolved)
+    codebase_chunks = retrieve_codebase_chunks(req, description)
+    content = generate_spec(req.title, description, resolved, codebase_chunks=codebase_chunks)
     return save_spec(session, req.requirement_id, content)
 
 
@@ -103,8 +128,14 @@ def main():
 
         while True:
             content = json.loads(spec.content_json)
-            print(f"\n--- Spec v{spec.version} (confidence: {content.get('confidence')}) ---")
+            review_status = content.get("review_status") or (
+                "needs careful review" if float(content.get("confidence") or 0.0) < 0.75 else "moderate confidence"
+            )
+            print(f"\n--- Spec v{spec.version} (confidence: {content.get('confidence')} / {review_status}) ---")
             print(json.dumps(content, indent=2))
+
+            if review_status == "needs careful review":
+                print("Review note: this spec should be checked carefully before approval.")
 
             decision = input("\napprove / modify / reject: ").strip().lower()
             if decision == "approve":
