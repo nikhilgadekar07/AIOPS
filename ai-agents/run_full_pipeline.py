@@ -12,7 +12,7 @@ from sqlmodel import Session, select
 from agents.ambiguity_agent import detect_ambiguities
 from agents.implementation_agent import apply_implementation_plan, generate_implementation_plan, validate_implementation
 from agents.spec_agent import generate_spec
-from input_adapter.workspace import prepare_from_github, prepare_from_zip, prepare_new
+from input_adapter.workspace import prepare_from_github, prepare_from_local, prepare_from_zip, prepare_new
 from orchestrator.db import engine, init_db
 from orchestrator.entities import ClarifyingQuestion, Requirement
 from orchestrator.spec_store import save_spec
@@ -173,6 +173,7 @@ def main():
     parser.add_argument("--interactive", action="store_true", help="Prompt for clarifying answers and spec review")
     parser.add_argument("--require-human-review", action="store_true", help="Require a human review gate before implementation proceeds")
     parser.add_argument("--auto-approve", action="store_true", help="Approve the spec automatically without a manual review step")
+    parser.add_argument("--clarifications", help="JSON list of user answers to clarification questions")
     args = parser.parse_args()
 
     user_prompt = (args.prompt or "").strip() or " ".join(part for part in [args.title or "", args.description or ""] if part).strip()
@@ -192,12 +193,17 @@ def main():
         if args.mode == "existing":
             if not args.location:
                 parser.error("existing mode requires --location")
-            if args.location.endswith(".zip"):
+            location = args.location.strip()
+            is_remote = location.startswith(("https://", "http://", "git@", "ssh://"))
+            if location.lower().split("?", 1)[0].endswith(".zip") and not is_remote:
                 workspace_path = prepare_from_zip(requirement_id, args.location)
                 repo_url = None
-            else:
+            elif is_remote:
                 workspace_path = prepare_from_github(requirement_id, args.location)
                 repo_url = args.location
+            else:
+                workspace_path = prepare_from_local(requirement_id, location)
+                repo_url = None
         else:
             workspace_path = prepare_new(requirement_id)
             repo_url = None
@@ -221,7 +227,15 @@ def main():
         session.add(req)
         session.commit()
 
-        questions = detect_ambiguities(title, description)
+        if args.clarifications is None:
+            questions = detect_ambiguities(title, description)
+        else:
+            try:
+                questions = json.loads(args.clarifications)
+            except json.JSONDecodeError as exc:
+                parser.error(f"--clarifications must be valid JSON: {exc}")
+            if not isinstance(questions, list):
+                parser.error("--clarifications must be a JSON list.")
         log_stage("Ambiguity Check", f"Checking for missing details and clarifying anything that could block a clean build. Found {len(questions)} possible gaps.", stage_log, output_path=ROOT / "workspace" / "live_status.json", requirement_id=requirement_id, prompt=description)
         for q in questions:
             session.add(
@@ -229,6 +243,7 @@ def main():
                     requirement_id=requirement_id,
                     question=q["question"],
                     assumed_default=q["assumed_default"],
+                    answer=q.get("answer") or q["assumed_default"],
                 )
             )
         session.commit()
@@ -273,12 +288,21 @@ def main():
             session.commit()
             log_stage("Review Gate", "The request has passed the review gate and is ready for implementation.", stage_log, output_path=ROOT / "workspace" / "live_status.json", requirement_id=requirement_id, prompt=description)
 
+        clarification_answers = build_resolved(session, requirement_id)
+        render_context = description
+        if clarification_answers:
+            rendered_answers = "\n".join(
+                f"Q: {item['question']}\nA: {item['answer']}" for item in clarification_answers
+            )
+            render_context = f"{description}\n\nClarification answers:\n{rendered_answers}"
+
         project_root = Path(workspace_path)
         plan = generate_implementation_plan(title, description, spec, codebase_chunks=[], use_llm=False)
+        plan["title"] = title
         log_stage("Implementation Planning", "Mapping the accepted requirement into the exact files, components, and actions needed for the build.", stage_log, output_path=ROOT / "workspace" / "live_status.json", requirement_id=requirement_id, prompt=description)
         print_json("Implementation Plan", plan)
 
-        applied = apply_implementation_plan(plan, str(project_root))
+        applied = apply_implementation_plan(plan, str(project_root), render_context)
         log_stage("Applying Changes", f"Writing the implementation into the workspace now. Files touched: {applied or 'none'}.", stage_log, output_path=ROOT / "workspace" / "live_status.json", requirement_id=requirement_id, prompt=description)
         print(f"\nApplied implementation updates: {applied or 'none'}")
 
@@ -296,9 +320,12 @@ def main():
             "stages": stage_log,
             "plan": plan,
             "validation": validation,
-            "generated_files": plan.get("files", []) if isinstance(plan, dict) else [],
+            "generated_files": sorted(set(plan.get("files", []) + applied)) if isinstance(plan, dict) else applied,
             "output_path": str(output_path),
+            "workspace_path": str(project_root),
         }
+        if "index.html" in output_payload["generated_files"]:
+            output_payload["preview_url"] = f"/api/preview/{requirement_id}"
         output_path.write_text(json.dumps(output_payload, indent=2), encoding="utf-8")
         print(f"\nSaved full pipeline output to: {output_path}")
 

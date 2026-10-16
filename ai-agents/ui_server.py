@@ -4,11 +4,12 @@ import sys
 import threading
 import uuid
 from datetime import datetime, timezone
+import mimetypes
 from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel
 from sqlmodel import Session, select
 
@@ -18,6 +19,7 @@ sys.path.insert(0, str(AI_AGENTS))
 
 from orchestrator.db import engine, init_db
 from orchestrator.entities import Requirement
+from agents.ambiguity_agent import detect_ambiguities
 
 init_db()
 
@@ -181,6 +183,15 @@ HTML_PAGE = """
         font-size: 12px;
         word-break: break-word;
       }
+      .clarification-panel { display: none; }
+      .clarification-panel.visible { display: block; }
+      .question-field { display: block; margin-top: 16px; color: #e5e7eb; }
+      .question-field textarea { min-height: 82px; resize: vertical; }
+      .preview-frame { width: 100%; min-height: 720px; border: 1px solid #334155; border-radius: 8px; background: white; margin-top: 16px; }
+      .build-result { color: #dbeafe; padding: 18px 0 4px; white-space: pre-wrap; }
+      .output-title { display: flex; align-items: center; gap: 14px; min-width: 0; }
+      .preview-link { color: #a5f3fc; font-size: 14px; font-weight: 700; text-decoration: none; white-space: nowrap; }
+      .preview-link:hover { text-decoration: underline; }
       pre {
         white-space: pre-wrap;
         margin: 0;
@@ -268,12 +279,24 @@ HTML_PAGE = """
         </div>
       </div>
 
+      <div id="clarificationPanel" class="panel clarification-panel">
+        <h2>Before we build</h2>
+        <p style="color:#cbd5e1;">Answer these details to shape the result. You can edit or accept the suggested answers.</p>
+        <div id="clarificationQuestions"></div>
+        <div class="button-row">
+          <button id="buildWithAnswersBtn">Build with these answers</button>
+          <button class="ghost" id="useDefaultsBtn">Use suggestions</button>
+        </div>
+      </div>
+
       <div class="panel">
         <div class="status-topline" style="margin-bottom:0;">
-          <h2 style="margin:0;">Build output</h2>
+          <div class="output-title"><h2 style="margin:0;">Build output</h2><a id="previewLink" class="preview-link" target="_blank" rel="noopener noreferrer" hidden>Open website ↗</a></div>
           <span id="currentProjectInfo">No active run</span>
         </div>
         <div id="artifactList" class="artifact-list"></div>
+        <div id="buildResult" class="build-result">Your finished result will appear here.</div>
+        <iframe id="previewFrame" class="preview-frame" title="Generated website preview" sandbox="allow-scripts allow-forms" referrerpolicy="no-referrer" hidden></iframe>
         <div id="executionLog" class="execution-log"><pre>No activity yet. When the build starts, logs will appear here.</pre></div>
       </div>
     </div>
@@ -291,7 +314,21 @@ HTML_PAGE = """
       const executionLog = document.getElementById('executionLog');
       const artifactList = document.getElementById('artifactList');
       const currentProjectInfo = document.getElementById('currentProjectInfo');
+      const clarificationPanel = document.getElementById('clarificationPanel');
+      const clarificationQuestions = document.getElementById('clarificationQuestions');
+      const buildResult = document.getElementById('buildResult');
+      const previewFrame = document.getElementById('previewFrame');
+      const previewLink = document.getElementById('previewLink');
       let statusPollId = null;
+      let pendingBuild = null;
+      let activeClarifications = [];
+      let lastOutputSignature = null;
+
+      function escapeHtml(value) {
+        return String(value ?? '').replace(/[&<>"']/g, char => ({
+          '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+        })[char]);
+      }
 
       function updateStatusPanel(data = {}) {
         const stage = data.stage || 'Waiting';
@@ -345,13 +382,26 @@ HTML_PAGE = """
 
       function renderReviewPanel(review) {
         reviewPanel.classList.add('visible');
-        reviewSummary.innerHTML = `<strong>Summary</strong><br>${review.summary || 'The request is ready for a human review.'}`;
+        reviewSummary.innerHTML = `<strong>Summary</strong><br>${escapeHtml(review.summary || 'The request is ready for a human review.')}`;
         reviewQuestions.innerHTML = (review.questions || []).map(item => `
           <div style="margin-top:10px;">
-            <strong>${item.question || 'Review item'}</strong>
-            <div style="color:#cbd5e1; margin-top:4px;">${item.answer || 'No answer supplied yet.'}</div>
+            <strong>${escapeHtml(item.question || 'Review item')}</strong>
+            <div style="color:#cbd5e1; margin-top:4px;">${escapeHtml(item.answer || 'No answer supplied yet.')}</div>
           </div>
         `).join('') || '<strong>Review check</strong><div style="color:#cbd5e1; margin-top:4px;">No extra questions generated.</div>';
+      }
+
+      function renderClarificationPanel(questions) {
+        clarificationPanel.classList.add('visible');
+        clarificationQuestions.innerHTML = questions.map((item, index) => `
+          <label class="question-field"><strong>${escapeHtml(item.question)}</strong>
+            <textarea data-answer-index="${index}">${escapeHtml(item.assumed_default || '')}</textarea>
+          </label>
+        `).join('');
+      }
+
+      function hideClarificationPanel() {
+        clarificationPanel.classList.remove('visible');
       }
 
       function hideReviewPanel() {
@@ -366,13 +416,32 @@ HTML_PAGE = """
           ...stages.map(step => `- ${step.stage}: ${step.message}`),
         ].join('\\n');
 
-        executionLog.innerHTML = `<pre>${summary || 'No activity yet.'}</pre>`;
+        executionLog.querySelector('pre').textContent = summary || 'No activity yet.';
+        const validationBody = data.validation?.checks?.[0]?.body;
+        buildResult.textContent = validationBody?.summary || validationBody?.message ||
+          (data.validation?.status ? `Build validation: ${data.validation.status}.` : 'Build completed.');
+        if (data.preview_url) {
+          const previewUrl = new URL(data.preview_url, window.location.href).href;
+          if (previewFrame.getAttribute('src') !== previewUrl) {
+            previewFrame.src = previewUrl;
+          }
+          if (previewLink.href !== previewUrl) {
+            previewLink.href = previewUrl;
+          }
+          previewLink.hidden = false;
+          previewFrame.hidden = false;
+        } else {
+          previewFrame.removeAttribute('src');
+          previewLink.removeAttribute('href');
+          previewLink.hidden = true;
+          previewFrame.hidden = true;
+        }
 
         if (files.length) {
           artifactList.innerHTML = files.map(fileName => `
             <div class="artifact-card">
-              <div><strong>${fileName}</strong></div>
-              <div class="artifact-path">${data.output_path || 'Generated in project workspace'}</div>
+              <div><strong>${escapeHtml(fileName)}</strong></div>
+              <div class="artifact-path">${escapeHtml(data.workspace_path || data.output_path || 'Generated in project workspace')}</div>
             </div>
           `).join('');
         } else {
@@ -389,9 +458,19 @@ HTML_PAGE = """
       async function fetchLatestOutput() {
         const res = await fetch('/api/latest');
         const data = await res.json();
+        const signature = JSON.stringify(data);
+        if (signature === lastOutputSignature) {
+          return;
+        }
+        lastOutputSignature = signature;
         if (data.status === 'no-data') {
           executionLog.innerHTML = '<pre>No activity yet. When the build starts, logs will appear here.</pre>';
           artifactList.innerHTML = '';
+          buildResult.textContent = 'Your finished result will appear here.';
+          previewFrame.removeAttribute('src');
+          previewLink.removeAttribute('href');
+          previewLink.hidden = true;
+          previewFrame.hidden = true;
           currentProjectInfo.textContent = 'No active run';
           return;
         }
@@ -424,6 +503,7 @@ HTML_PAGE = """
           require_human_review: humanReview,
           review_decision: decision,
           review_notes: notes,
+          clarifications: activeClarifications,
         };
 
         const res = await fetch('/api/run', {
@@ -447,6 +527,53 @@ HTML_PAGE = """
         startStatusPolling();
       }
 
+      async function launchBuild(clarifications) {
+        activeClarifications = clarifications;
+        hideClarificationPanel();
+        const runButton = document.getElementById('runBtn');
+        runButton.disabled = true;
+        runButton.textContent = 'Building...';
+        msg.textContent = 'Build started. The AI is working through the request...';
+        updateStatusPanel({ stage: 'Understanding Request', progress: 10, message: 'Preparing the clarified build plan.', stages: [] });
+        const payload = {
+          prompt: pendingBuild.prompt,
+          project_mode: pendingBuild.projectMode,
+          mode: pendingBuild.projectMode,
+          repo_url: pendingBuild.repoLocation,
+          location: pendingBuild.repoLocation,
+          require_human_review: pendingBuild.humanReview,
+          clarifications,
+        };
+        try {
+          const res = await fetch('/api/run', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+          });
+          const data = await res.json();
+          if (!res.ok) throw new Error(data.detail || `Request failed (${res.status}).`);
+          if (data.status === 'review_required') {
+            renderReviewPanel(data.review || { summary: data.message, questions: [] });
+            msg.textContent = 'Review the request before implementation starts.';
+            return;
+          }
+          hideReviewPanel();
+          msg.textContent = data.message || 'Pipeline started successfully.';
+          startStatusPolling();
+        } catch (error) {
+          msg.textContent = `Build could not start: ${error.message}`;
+        } finally {
+          runButton.disabled = false;
+          runButton.textContent = 'Start build';
+        }
+      }
+
+      async function answerClarifications(useDefaults = false) {
+        const answers = pendingBuild.questions.map((item, index) => {
+          const field = clarificationQuestions.querySelector(`[data-answer-index="${index}"]`);
+          return { ...item, answer: useDefaults ? item.assumed_default : (field.value.trim() || item.assumed_default) };
+        });
+        await launchBuild(answers);
+      }
+
       async function runPipeline() {
         const prompt = document.getElementById('prompt').value.trim();
         const projectMode = document.getElementById('projectMode').value;
@@ -464,52 +591,32 @@ HTML_PAGE = """
         }
 
         const runButton = document.getElementById('runBtn');
+        pendingBuild = { prompt, projectMode, repoLocation, humanReview };
         runButton.disabled = true;
-        runButton.textContent = 'Building...';
-        msg.textContent = 'Build started. The AI is working through the request...';
-        updateStatusPanel({
-          status: 'working',
-          stage: 'Understanding Request',
-          progress: 10,
-          message: 'I am reading your request and preparing the build plan.',
-          stages: [{ stage: 'Understanding Request', message: 'I am reading your request and preparing the build plan.' }],
-        });
-
-        const payload = {
-          prompt,
-          project_mode: projectMode,
-          mode: projectMode,
-          repo_url: repoLocation,
-          location: repoLocation,
-          require_human_review: humanReview,
-        };
-
+        runButton.textContent = 'Checking...';
+        hideReviewPanel();
+        msg.textContent = 'Checking which details will help shape the result...';
         try {
-          const res = await fetch('/api/run', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload),
+          const res = await fetch('/api/clarify', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ prompt }),
           });
           const data = await res.json();
-          if (!res.ok) {
-            throw new Error(data.detail || `Request failed (${res.status}).`);
+          if (!res.ok) throw new Error(data.detail || `Request failed (${res.status}).`);
+          pendingBuild.questions = data.questions || [];
+          if (pendingBuild.questions.length) {
+            renderClarificationPanel(pendingBuild.questions);
+            msg.textContent = 'Answer the follow-up questions, or use the suggested answers.';
+          } else {
+            await launchBuild([]);
           }
-
-          if (data.status === 'review_required') {
-            renderReviewPanel(data.review || { summary: data.message, questions: [] });
-            msg.textContent = 'This request needs human approval before implementation starts.';
-            return;
-          }
-
-          hideReviewPanel();
-          msg.textContent = data.message || 'Pipeline started successfully.';
-          startStatusPolling();
         } catch (error) {
-          msg.textContent = `Build could not start: ${error.message}`;
-          updateStatusPanel({ stage: 'Build failed', message: error.message, progress: 0, stages: [] });
+          msg.textContent = `Could not prepare the build: ${error.message}`;
         } finally {
-          runButton.disabled = false;
-          runButton.textContent = 'Start build';
+          if (!statusPollId) {
+            runButton.disabled = false;
+            runButton.textContent = 'Start build';
+          }
         }
       }
 
@@ -518,6 +625,8 @@ HTML_PAGE = """
       document.getElementById('approveReviewBtn').addEventListener('click', () => submitBuild('approve'));
       document.getElementById('modifyReviewBtn').addEventListener('click', () => submitBuild('modify', 'Please refine the requirements before building.'));
       document.getElementById('rejectReviewBtn').addEventListener('click', () => submitBuild('reject'));
+      document.getElementById('buildWithAnswersBtn').addEventListener('click', () => answerClarifications(false));
+      document.getElementById('useDefaultsBtn').addEventListener('click', () => answerClarifications(true));
       updateProjectModeVisibility();
       fetchLatestOutput();
       updateStatusPanel();
@@ -539,6 +648,11 @@ class RunRequest(BaseModel):
     require_human_review: bool = False
     review_decision: str | None = None
     review_notes: str | None = None
+    clarifications: list[dict[str, str]] | None = None
+
+
+class ClarifyRequest(BaseModel):
+    prompt: str
 
 
 class RunResponse(BaseModel):
@@ -665,6 +779,47 @@ async def latest_output() -> dict[str, Any]:
     return output
 
 
+@app.post("/api/clarify")
+async def clarify_request(payload: ClarifyRequest) -> dict[str, Any]:
+    prompt = payload.prompt.strip()
+    if not prompt:
+        raise HTTPException(status_code=400, detail="A natural-language prompt is required.")
+    title = " ".join(prompt.split()[:10])
+    return {"questions": detect_ambiguities(title, prompt)}
+
+
+@app.get("/api/preview/{requirement_id}", response_class=HTMLResponse)
+async def preview_website(requirement_id: str) -> HTMLResponse:
+    with Session(engine) as session:
+        requirement = session.exec(
+            select(Requirement).where(Requirement.requirement_id == requirement_id)
+        ).first()
+    if requirement is None or not requirement.workspace_path:
+        raise HTTPException(status_code=404, detail="Generated website not found.")
+    workspace_path = Path(requirement.workspace_path).resolve()
+    page_path = (workspace_path / "index.html").resolve()
+    if not page_path.is_relative_to(workspace_path) or not page_path.is_file():
+        raise HTTPException(status_code=404, detail="Generated website not found.")
+    return HTMLResponse(content=page_path.read_text(encoding="utf-8"))
+
+
+@app.get("/api/preview/{requirement_id}/{asset_path:path}")
+async def preview_asset(requirement_id: str, asset_path: str) -> FileResponse:
+    with Session(engine) as session:
+        requirement = session.exec(
+            select(Requirement).where(Requirement.requirement_id == requirement_id)
+        ).first()
+    if requirement is None or not requirement.workspace_path:
+        raise HTTPException(status_code=404, detail="Generated asset not found.")
+    workspace_path = Path(requirement.workspace_path).resolve()
+    requested_path = (workspace_path / asset_path).resolve()
+    if not requested_path.is_relative_to(workspace_path) or not requested_path.is_file():
+        raise HTTPException(status_code=404, detail="Generated asset not found.")
+    if requested_path.suffix.lower() not in {".jpg", ".jpeg", ".png", ".webp"}:
+        raise HTTPException(status_code=404, detail="Generated asset not found.")
+    return FileResponse(requested_path, media_type=mimetypes.guess_type(requested_path.name)[0] or "application/octet-stream")
+
+
 @app.post("/api/run", response_model=RunResponse)
 async def run_pipeline(payload: RunRequest) -> RunResponse:
     prompt = (payload.prompt or payload.description or "").strip()
@@ -706,6 +861,8 @@ async def run_pipeline(payload: RunRequest) -> RunResponse:
         review_notes = review_notes or "The reviewer requested changes before implementation."
         prompt = f"{prompt}\n\nReview feedback: {review_notes}"
 
+    clarifications_json = json.dumps(payload.clarifications) if payload.clarifications is not None else None
+
     cmd = [
         sys.executable,
         str(AI_AGENTS / "run_full_pipeline.py"),
@@ -720,6 +877,8 @@ async def run_pipeline(payload: RunRequest) -> RunResponse:
         cmd.append("--auto-approve")
     if repo_location and project_mode == "existing":
         cmd.extend(["--location", repo_location])
+    if clarifications_json is not None:
+      cmd.extend(["--clarifications", clarifications_json])
 
     cwd = str(ROOT)
     _write_start_status(prompt)
